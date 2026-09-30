@@ -1,158 +1,116 @@
-import "./styles.css";
+import { useMemo, useState } from "react";
+import { useStore } from "./store";
+import { fmt } from "./domain";
+import { BatchesPanel } from "./components/BatchesPanel";
+import { OccupancyPanel } from "./components/OccupancyPanel";
+import { ConflictsPanel } from "./components/ConflictsPanel";
+import { AuditPanel } from "./components/AuditPanel";
+import { Badge } from "./components/ui";
 
-const project = {
-  "id": "hxwl-09",
-  "port": 5109,
-  "title": "半导体洁净室巡检",
-  "subtitle": "洁净等级阈值、粒子计数与异常处理看板",
-  "stack": "React + Vite + TypeScript + CSS",
-  "theme": [
-    "#0f766e",
-    "#2563eb",
-    "#e11d48"
-  ],
-  "domain": "洁净室巡检",
-  "users": [
-    "巡检员",
-    "厂务工程师",
-    "班组长"
-  ],
-  "metrics": [
-    "粒子异常",
-    "压差异常",
-    "温湿度偏移",
-    "待处理"
-  ],
-  "filters": [
-    "ISO 5",
-    "ISO 6",
-    "ISO 7",
-    "黄光区"
-  ],
-  "fields": [
-    "房间编号",
-    "洁净等级",
-    "粒子计数",
-    "温湿度",
-    "压差",
-    "设备状态",
-    "处理备注"
-  ],
-  "records": [
-    [
-      "CR-1201",
-      "ISO 5",
-      "异常",
-      "0.5um粒子超限，已通知厂务"
-    ],
-    [
-      "CR-2107",
-      "ISO 6",
-      "稳定",
-      "压差15Pa，温湿度正常"
-    ],
-    [
-      "Y-0302",
-      "黄光区",
-      "关注",
-      "湿度接近上限"
-    ]
-  ]
-};
+type Tab = "batches" | "occupancy" | "conflicts" | "audit";
 
-const statusColors = ["status-ok", "status-watch", "status-danger"];
+const TABS: { id: Tab; label: string }[] = [
+  { id: "batches", label: "批次放行" },
+  { id: "occupancy", label: "层流台占用" },
+  { id: "conflicts", label: "冲突与维护" },
+  { id: "audit", label: "阻断与审计" },
+];
 
-function MetricCard({ label, value, index }: { label: string; value: string; index: number }) {
-  return (
-    <article className="metric-card">
-      <span>{label}</span>
-      <strong>{value}</strong>
-      <i className={statusColors[index % statusColors.length]} />
-    </article>
-  );
-}
+const RULES = [
+  "同一层流台同一时段只能归一个房间",
+  "离线批次带采集时点与设备快照",
+  "同字段两边改过 → 两版并存待下一班确认",
+  "校准/滤芯登记 → 引用旧快照结论立即失效重算，原始采样保留",
+  "失败批次单独重试；已接收批次幂等不重复",
+  "房间有未结异常或容量不足不能放行，页面与审计列出阻断对象",
+];
 
 function App() {
-  const values = project.metrics.map((metric: string, index: number) => {
-    const base = [84, 12, 31, 7][index % 4];
-    return String(base + index * 3);
-  });
+  const store = useStore();
+  const { state, dispatch } = store;
+  const [tab, setTab] = useState<Tab>("batches");
+
+  const metrics = useMemo(() => {
+    const pending = state.batches.filter((b) => b.syncState !== "RECEIVED").length;
+    const failed = state.batches.filter((b) => b.syncState === "FAILED").length;
+    const conflicts = state.conflicts.filter((c) => c.status === "PENDING").length;
+    const blockTargets = new Set(
+      state.batches
+        .filter((b) => b.conclusion.kind === "BLOCKED")
+        .flatMap((b) => b.conclusion.reasons.flatMap((r) => r.targets)),
+    ).size;
+    return { pending, failed, conflicts, blockTargets };
+  }, [state]);
+
+  const metricCards = [
+    { label: "待合并批次", value: metrics.pending, tone: "amber" as const },
+    { label: "同步失败（可单批重试）", value: metrics.failed, tone: "red" as const },
+    { label: "字段冲突待下一班确认", value: metrics.conflicts, tone: "violet" as const },
+    { label: "当前阻断对象", value: metrics.blockTargets, tone: "blue" as const },
+  ];
 
   return (
     <main className="app-shell">
       <section className="hero">
         <div>
-          <p className="eyebrow">{project.id} · port {project.port}</p>
-          <h1>{project.title}</h1>
-          <p className="subtitle">{project.subtitle}</p>
+          <p className="eyebrow">hxwl-09 · 巡检员离线采样 · 回网合并沙盘</p>
+          <h1>洁净室离线采样合并</h1>
+          <p className="subtitle">
+            合并房间采样、层流台占用与批次放行单：占用互斥、字段两版并存、维护即时失效重算、失败单独重试、阻断对象全程留痕。
+          </p>
+          <div className="status-bar">
+            <button className={state.online ? "link-on" : "link-off"} onClick={() => dispatch({ type: "TOGGLE_ONLINE" })}>
+              {state.online ? "● 已回网" : "○ 离线模式"}
+            </button>
+            <span className="clock">沙盘时钟 {fmt(state.clock)}</span>
+            <button onClick={() => dispatch({ type: "TICK" })}>+1 分钟</button>
+            <button onClick={() => dispatch({ type: "RESET" })}>重置演练数据</button>
+          </div>
         </div>
         <div className="stack-card">
-          <span>技术栈</span>
-          <strong>{project.stack}</strong>
+          <span>建议演练路径</span>
+          <strong>① 回网 → 合并全部（B-2401 首传失败）→ ② 单独重试 B-2401 → ③ 处理备注两版 → ④ 登记 LF-03 滤芯维护观察失效重算</strong>
+          <div className="chips tight">
+            {state.online ? <Badge tone="teal">在线</Badge> : <Badge tone="amber">离线</Badge>}
+            <Badge tone="gray">localStorage 持久化</Badge>
+          </div>
         </div>
       </section>
 
       <section className="metrics-grid">
-        {project.metrics.map((metric: string, index: number) => (
-          <MetricCard key={metric} label={metric} value={values[index]} index={index} />
+        {metricCards.map((m) => (
+          <article className="metric-card" key={m.label}>
+            <span>{m.label}</span>
+            <strong>{m.value}</strong>
+            <i className={`tone-bar ${m.tone}`} />
+          </article>
         ))}
       </section>
 
-      <section className="workspace">
-        <aside className="panel narrow">
-          <h2>角色</h2>
-          <div className="chips">
-            {project.users.map((user: string) => (
-              <span key={user}>{user}</span>
-            ))}
-          </div>
-          <h2>筛选</h2>
-          <div className="chips muted">
-            {project.filters.map((filter: string) => (
-              <button key={filter}>{filter}</button>
-            ))}
-          </div>
-        </aside>
-
-        <section className="panel">
-          <div className="section-heading">
-            <div>
-              <p>{project.domain}</p>
-              <h2>记录字段</h2>
-            </div>
-            <button className="primary-action">新增记录</button>
-          </div>
-          <div className="field-grid">
-            {project.fields.map((field: string) => (
-              <label key={field}>
-                <span>{field}</span>
-                <input placeholder={"填写" + field} />
-              </label>
-            ))}
-          </div>
-        </section>
-      </section>
-
-      <section className="records panel">
-        <div className="section-heading">
-          <div>
-            <p>示例数据</p>
-            <h2>近期记录</h2>
-          </div>
-          <button>导出摘要</button>
-        </div>
-        <div className="record-list">
-          {project.records.map((record: string[], index: number) => (
-            <article key={record.join("-")} className="record-card">
-              <div className="record-index">{String(index + 1).padStart(2, "0")}</div>
-              <div>
-                <h3>{record[0]}</h3>
-                <p>{record.slice(1).join(" · ")}</p>
-              </div>
-            </article>
+      <section className="rules-strip panel">
+        <p className="eyebrow">业务规则</p>
+        <ul>
+          {RULES.map((r, i) => (
+            <li key={r}>
+              <em>{String(i + 1).padStart(2, "0")}</em>
+              {r}
+            </li>
           ))}
-        </div>
+        </ul>
       </section>
+
+      <nav className="tabs">
+        {TABS.map((t) => (
+          <button key={t.id} className={tab === t.id ? "tab active" : "tab"} onClick={() => setTab(t.id)}>
+            {t.label}
+          </button>
+        ))}
+      </nav>
+
+      {tab === "batches" && <BatchesPanel store={store} />}
+      {tab === "occupancy" && <OccupancyPanel store={store} />}
+      {tab === "conflicts" && <ConflictsPanel store={store} />}
+      {tab === "audit" && <AuditPanel store={store} />}
     </main>
   );
 }
